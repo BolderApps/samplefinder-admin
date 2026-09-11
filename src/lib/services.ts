@@ -651,6 +651,29 @@ export const eventsService = {
     DatabaseService.getById<EventDocument>(appwriteConfig.collections.events, id),
   list: (queries?: string[]) =>
     DatabaseService.list<EventDocument>(appwriteConfig.collections.events, queries),
+  /**
+   * Every event, paged. `list()` with no queries returns Appwrite's default page
+   * of 25, which silently hides most events from any client-side picker.
+   */
+  listAll: async (): Promise<EventDocument[]> => {
+    const PAGE_SIZE = 500
+    const allEvents: EventDocument[] = []
+    let offset = 0
+
+    for (;;) {
+      const page = await DatabaseService.list<EventDocument>(
+        appwriteConfig.collections.events,
+        [Query.limit(PAGE_SIZE), Query.offset(offset)]
+      )
+      allEvents.push(...page.documents)
+      if (page.documents.length < PAGE_SIZE) {
+        break
+      }
+      offset += PAGE_SIZE
+    }
+
+    return allEvents
+  },
   update: (id: string, data: Record<string, unknown>) =>
     DatabaseService.update<EventDocument>(appwriteConfig.collections.events, id, data),
   delete: (id: string) =>
@@ -1645,6 +1668,45 @@ export interface TriviaStats {
   completed: number
 }
 
+export interface PopupsStats {
+  totalPopups: number
+  scheduled: number
+  active: number
+  completed: number
+}
+
+/**
+ * One row per USER of "Who saw this pop-up", not one per sighting (SAM-12): a repeat viewer
+ * arrives once, with `impressions` carrying how many times they were shown it.
+ */
+export interface PopupViewerRow {
+  userId: string
+  /** Display name from user_profiles, falling back to username then the raw id. */
+  name: string
+  username: string
+  /** Sightings by this user, same-day repeats included. Always >= 1. */
+  impressions: number
+  firstShownAt: string | null
+  lastShownAt: string | null
+  /** The most recent click, or null for a user who never clicked any sighting. */
+  clickedAt: string | null
+  /** Distinct Eastern "YYYY-MM-DD" days this user was shown the pop-up. */
+  dayKeys: string[]
+  is21Plus: boolean
+}
+
+export interface PopupDetailStatistics {
+  totalImpressions: number
+  uniqueUsersShown: number
+  uniqueClickers: number
+  clickers21Plus: number
+  /** uniqueClickers / uniqueUsersShown, 0–1 */
+  ctr: number
+  viewers: PopupViewerRow[]
+  /** True when the campaign has more unique viewers than the response cap (1000). */
+  viewersTruncated: boolean
+}
+
 // Statistics Service
 export const statisticsService = {
   /**
@@ -1652,15 +1714,16 @@ export const statisticsService = {
    * @param page - The page to get statistics for: 'dashboard' | 'clients' | 'users' | 'notifications' | 'trivia'
    * @returns Statistics object for the requested page
    */
-  getStatistics: async <T extends DashboardStats | ClientsStats | UsersStats | NotificationsStats | TriviaStats>(
-    page: 'dashboard' | 'clients' | 'users' | 'notifications' | 'trivia'
+  getStatistics: async <T extends DashboardStats | ClientsStats | UsersStats | NotificationsStats | TriviaStats | PopupsStats | PopupDetailStatistics>(
+    page: 'dashboard' | 'clients' | 'users' | 'notifications' | 'trivia' | 'popups',
+    extra?: { popupId?: string }
   ): Promise<T> => {
     try {
       const execution = await functions.createExecution({
         functionId: appwriteConfig.functions.statisticsFunctionId,
         xpath: '/get-statistics',
         method: ExecutionMethod.POST,
-        body: JSON.stringify({ page }),
+        body: JSON.stringify({ page, ...(extra ?? {}) }),
         headers: {
           'Content-Type': 'application/json',
         },
@@ -2204,6 +2267,99 @@ export const notificationsService = {
     } catch (error) {
       console.error('Error sending tier notification:', error)
       throw error
+    }
+  },
+}
+
+// ============================================================================
+// Popups (SAM-5)
+// ============================================================================
+
+// Popup Document interface — banner image pop-ups shown in the mobile app
+export interface PopupDocument extends Models.Document {
+  title: string
+  imageUrl: string
+  imageFileId: string
+  link?: string | null
+  /** Optional body text shown under the title on the pop-up. */
+  description?: string | null
+  startDate: string
+  endDate: string
+  /** Display gate: only serve to 21+ verified users. Defaults to true. */
+  only21Plus?: boolean
+  targetAudience: NotificationAudience
+  selectedUserIds?: string[]
+  selectedZipCodes?: string[]
+  newUsersTimeRange?: number | null
+  /** Where tapping the pop-up goes: an external URL (default when absent) or an in-app event page. */
+  destinationType?: 'external' | 'event' | null
+  destinationEventId?: string | null
+  /** Serve events (impressions), maintained by the Mobile API function */
+  views?: number
+  /** Unique clickers, maintained by the Mobile API function */
+  clicks?: number
+  /**
+   * Set by "Show again": impressions recorded before this moment no longer count towards the
+   * one-sighting-per-user-per-day rule, so today's viewers see the banner once more.
+   */
+  interactionsResetAt?: string | null
+  [key: string]: unknown
+}
+
+export const popupsService = {
+  create: (data: Record<string, unknown>) =>
+    DatabaseService.create<PopupDocument>(appwriteConfig.collections.popups, data),
+  getById: (id: string) =>
+    DatabaseService.getById<PopupDocument>(appwriteConfig.collections.popups, id),
+  list: (queries?: string[]) =>
+    DatabaseService.list<PopupDocument>(appwriteConfig.collections.popups, queries),
+  update: (id: string, data: Record<string, unknown>) =>
+    DatabaseService.update<PopupDocument>(appwriteConfig.collections.popups, id, data),
+  delete: (id: string) =>
+    DatabaseService.delete(appwriteConfig.collections.popups, id),
+
+  /**
+   * "Show again": re-open this pop-up to users who have already seen it today.
+   *
+   * Server-side rather than a direct write, for two reasons: `popup_interactions` grants no
+   * client access at all, and the one-sighting-per-day rule that this relaxes lives in the
+   * Mobile API. Pass a `userId` (a user_profiles document id, exactly as the viewers table
+   * reports it) to re-open it for that one person; omit it for everyone.
+   */
+  resetInteractions: async (
+    popupId: string,
+    userId?: string
+  ): Promise<{ scope: 'all' | 'user'; affected: number }> => {
+    if (!appwriteConfig.functions.mobileApiFunctionId) {
+      throw new Error('Mobile API function is not configured. Cannot re-show this pop-up.')
+    }
+
+    const execution = await functions.createExecution({
+      functionId: appwriteConfig.functions.mobileApiFunctionId,
+      xpath: '/reset-popup-interactions',
+      method: ExecutionMethod.POST,
+      body: JSON.stringify(userId ? { popupId, userId } : { popupId }),
+      headers: { 'Content-Type': 'application/json' },
+    })
+
+    if (execution.status !== 'completed' || !execution.responseBody) {
+      throw new Error(execution.responseBody || 'The re-show request did not complete')
+    }
+
+    const response = JSON.parse(execution.responseBody) as {
+      success?: boolean
+      error?: string
+      scope?: 'all' | 'user'
+      affected?: number
+    }
+    const status = execution.responseStatusCode ?? 0
+    if (status < 200 || status >= 300 || !response.success) {
+      throw new Error(response.error || 'Failed to re-show this pop-up')
+    }
+
+    return {
+      scope: response.scope ?? (userId ? 'user' : 'all'),
+      affected: response.affected ?? 0,
     }
   },
 }

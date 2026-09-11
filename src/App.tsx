@@ -15,6 +15,8 @@ import ReportBuilder from './pages/Reports/ReportBuilder'
 import Notifications from './pages/Notifications/Notifications'
 import Trivia from './pages/Trivia/Trivia'
 import TriviaDetails from './pages/Trivia/TriviaDetails'
+import Popups from './pages/Popups/Popups'
+import PopupDetails from './pages/Popups/PopupDetails'
 import Locations from './pages/Locations/Locations'
 import { ProtectedRoute } from './components'
 
@@ -121,6 +123,22 @@ function App() {
           element={
             <ProtectedRoute>
               <TriviaDetails />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/popups"
+          element={
+            <ProtectedRoute>
+              <Popups />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/popups/:popupId"
+          element={
+            <ProtectedRoute>
+              <PopupDetails />
             </ProtectedRoute>
           }
         />

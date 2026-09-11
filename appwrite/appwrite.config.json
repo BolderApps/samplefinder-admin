@@ -68,7 +68,7 @@
             "commands": "npm install && npm run build",
             "specification": "s-0.5vcpu-512mb",
             "path": "functions/Mobile API",
-            "buildSpecification": "s-0.5vcpu-512mb",
+            "buildSpecification": "s-2vcpu-2gb",
             "runtimeSpecification": "s-0.5vcpu-512mb",
             "deploymentRetention": 0
         },
@@ -1132,10 +1132,10 @@
         {
             "$id": "trivia",
             "$permissions": [
-                "create(\"users\")",
-                "read(\"users\")",
-                "update(\"users\")",
-                "delete(\"users\")"
+                "create(\"label:admin\")",
+                "read(\"label:admin\")",
+                "update(\"label:admin\")",
+                "delete(\"label:admin\")"
             ],
             "databaseId": "69217af50038b9005a61",
             "name": "Trivia",
@@ -1709,6 +1709,263 @@
                     "array": false,
                     "format": "",
                     "default": null
+                }
+            ],
+            "indexes": []
+        },
+        {
+            "$id": "popups",
+            "$permissions": [
+                "create(\"label:admin\")",
+                "read(\"label:admin\")",
+                "update(\"label:admin\")",
+                "delete(\"label:admin\")"
+            ],
+            "databaseId": "69217af50038b9005a61",
+            "name": "Popups",
+            "enabled": true,
+            "rowSecurity": false,
+            "columns": [
+                {
+                    "key": "title",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 200,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "description",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 1000,
+                    "default": null
+                },
+                {
+                    "key": "imageUrl",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 2000,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "imageFileId",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 100,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "link",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 2000,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "startDate",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "format": "",
+                    "default": null
+                },
+                {
+                    "key": "endDate",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "format": "",
+                    "default": null
+                },
+                {
+                    "key": "only21Plus",
+                    "type": "boolean",
+                    "required": false,
+                    "array": false,
+                    "default": true
+                },
+                {
+                    "key": "targetAudience",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "elements": [
+                        "All",
+                        "NewUsers",
+                        "BrandAmbassadors",
+                        "Influencers",
+                        "Tier1",
+                        "Tier2",
+                        "Tier3",
+                        "Tier4",
+                        "Tier5",
+                        "ZipCode",
+                        "Targeted"
+                    ],
+                    "format": "enum",
+                    "default": null
+                },
+                {
+                    "key": "selectedUserIds",
+                    "type": "string",
+                    "required": false,
+                    "array": true,
+                    "size": 1000,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "selectedZipCodes",
+                    "type": "string",
+                    "required": false,
+                    "array": true,
+                    "size": 1000,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "newUsersTimeRange",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "min": 1,
+                    "max": 365,
+                    "default": null
+                },
+                {
+                    "key": "destinationType",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "destinationEventId",
+                    "type": "string",
+                    "required": false,
+                    "array": false,
+                    "size": 64,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "views",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "min": 0,
+                    "max": 10000000,
+                    "default": 0
+                },
+                {
+                    "key": "clicks",
+                    "type": "integer",
+                    "required": false,
+                    "array": false,
+                    "min": 0,
+                    "max": 10000000,
+                    "default": 0
+                },
+                {
+                    "key": "interactionsResetAt",
+                    "type": "datetime",
+                    "required": false,
+                    "array": false,
+                    "format": "",
+                    "default": null
+                }
+            ],
+            "indexes": []
+        },
+        {
+            "$id": "popup_interactions",
+            "$permissions": [],
+            "databaseId": "69217af50038b9005a61",
+            "name": "Popup Interactions",
+            "enabled": true,
+            "rowSecurity": false,
+            "columns": [
+                {
+                    "key": "popup",
+                    "type": "relationship",
+                    "required": false,
+                    "array": false,
+                    "relatedTable": "popups",
+                    "relationType": "manyToOne",
+                    "twoWay": false,
+                    "twoWayKey": "interactions",
+                    "onDelete": "cascade",
+                    "side": "parent"
+                },
+                {
+                    "key": "user",
+                    "type": "relationship",
+                    "required": false,
+                    "array": false,
+                    "relatedTable": "user_profiles",
+                    "relationType": "manyToOne",
+                    "twoWay": false,
+                    "twoWayKey": "popupInteractions",
+                    "onDelete": "cascade",
+                    "side": "parent"
+                },
+                {
+                    "key": "dayKey",
+                    "type": "string",
+                    "required": true,
+                    "array": false,
+                    "size": 10,
+                    "default": null,
+                    "encrypt": false
+                },
+                {
+                    "key": "shownAt",
+                    "type": "datetime",
+                    "required": true,
+                    "array": false,
+                    "format": "",
+                    "default": null
+                },
+                {
+                    "key": "clicked",
+                    "type": "boolean",
+                    "required": false,
+                    "array": false,
+                    "default": false
+                },
+                {
+                    "key": "clickedAt",
+                    "type": "datetime",
+                    "required": false,
+                    "array": false,
+                    "format": "",
+                    "default": null
+                },
+                {
+                    "key": "resetAt",
+                    "type": "datetime",
+                    "required": false,
+                    "array": false,
+                    "format": "",
+                    "default": null
+                },
+                {
+                    "key": "is21Plus",
+                    "type": "boolean",
+                    "required": false,
+                    "array": false,
+                    "default": false
                 }
             ],
             "indexes": []

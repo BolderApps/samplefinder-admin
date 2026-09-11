@@ -101,6 +101,102 @@ interface DismissTriviaRequest {
   triviaId: string;
 }
 
+// Popup (SAM-5) types
+interface GetActivePopupsRequest {
+  userId: string;
+  /**
+   * New app builds report their own impressions via /record-popup-view once the
+   * banner is actually on screen. Absent/false keeps the legacy write-on-fetch
+   * behaviour for builds already in the field, which cannot report for themselves.
+   */
+  clientReportsViews?: boolean;
+}
+
+interface RecordPopupClickRequest {
+  userId: string;
+  popupId: string;
+}
+
+interface RecordPopupViewRequest {
+  userId: string;
+  popupId: string;
+}
+
+interface ResetPopupInteractionsRequest {
+  popupId: string;
+  /** Omitted resets the pop-up for everyone who has already seen it today. */
+  userId?: string;
+}
+
+/** Mirrors the local `targetAudience` union in `Notification functions/src/main.ts` — this
+ * function can't import the admin web type, so a local copy is kept in sync by hand. */
+type PopupAudience =
+  | 'All'
+  | 'NewUsers'
+  | 'BrandAmbassadors'
+  | 'Influencers'
+  | 'Tier1'
+  | 'Tier2'
+  | 'Tier3'
+  | 'Tier4'
+  | 'Tier5'
+  | 'ZipCode'
+  | 'Targeted';
+
+interface PopupDocument {
+  $id: string;
+  title: string;
+  imageUrl: string;
+  link?: string | null;
+  description?: string | null;
+  startDate: string;
+  endDate: string;
+  only21Plus?: boolean;
+  targetAudience?: PopupAudience;
+  selectedUserIds?: string[];
+  selectedZipCodes?: string[];
+  newUsersTimeRange?: number | null;
+  /** Where a tap goes: an external URL (default when absent) or an in-app event page. */
+  destinationType?: 'external' | 'event' | null;
+  destinationEventId?: string | null;
+  /** Set by "Show again": impressions older than this no longer close today's door. */
+  interactionsResetAt?: string | null;
+  views?: number;
+  clicks?: number;
+}
+
+interface ActivePopupResponse {
+  $id: string;
+  title: string | null;
+  imageUrl: string;
+  link: string | null;
+  description: string | null;
+  destinationType: 'external' | 'event';
+  destinationEventId: string | null;
+}
+
+interface PopupTargetingProfile {
+  $id: string;
+  $createdAt: string;
+  idAdult?: boolean;
+  dob?: string | null;
+  isAmbassador?: boolean;
+  isInfluencer?: boolean;
+  tierLevel?: string;
+  zipCode?: string | null;
+}
+
+interface PopupInteractionRow {
+  $id: string;
+  popup?: string | { $id?: string };
+  user?: string | { $id?: string };
+  dayKey?: string;
+  shownAt?: string;
+  /** Set by "Show again" for one user: this impression no longer closes today's door. */
+  resetAt?: string | null;
+  clicked?: boolean;
+}
+
 // Account deletion types
 interface DeleteAccountRequest {
   userId: string;
@@ -444,6 +540,8 @@ const LOCATIONS_TABLE_ID = 'locations';
 const CLIENTS_TABLE_ID = 'clients';
 const TRIVIA_TABLE_ID = 'trivia';
 const TRIVIA_RESPONSES_TABLE_ID = 'trivia_responses';
+const POPUPS_TABLE_ID = 'popups';
+const POPUP_INTERACTIONS_TABLE_ID = 'popup_interactions';
 const USER_PROFILES_TABLE_ID = 'user_profiles';
 const SETTINGS_TABLE_ID = 'settings';
 const DEFAULT_PAGE_SIZE = 10;
@@ -1183,6 +1281,655 @@ async function dismissTrivia(
   );
   log(`Added user ${userId} to skippedUsers for trivia ${triviaId}`);
   return { correctAnswerIndex };
+}
+
+// ============================================================================
+// POPUP FUNCTIONS (SAM-5)
+// ============================================================================
+
+const POPUP_APP_TIMEZONE = 'America/New_York';
+const GET_ACTIVE_POPUPS_LIMIT = 100;
+const POPUP_INTERACTIONS_TODAY_LIMIT = 200;
+/**
+ * One user's rows for one pop-up on one day. Normally a single row; each "Show again" adds
+ * one more, so this only has to be larger than the number of resets a campaign can plausibly
+ * receive in a day.
+ */
+const POPUP_USER_DAY_ROWS_LIMIT = 25;
+
+/** Day key (YYYY-MM-DD) in the app timezone; one serve per user per popup per day key. */
+function getPopupDayKey(now: Date = new Date()): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: POPUP_APP_TIMEZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now);
+}
+
+function computeAgeInYears(dobIso: string, now: Date): number | null {
+  const dob = new Date(dobIso);
+  if (isNaN(dob.getTime())) return null;
+  let age = now.getUTCFullYear() - dob.getUTCFullYear();
+  const monthDiff = now.getUTCMonth() - dob.getUTCMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && now.getUTCDate() < dob.getUTCDate())) {
+    age--;
+  }
+  return age;
+}
+
+/**
+ * 21+ eligibility: requires the signup attestation (idAdult) AND, when a birthdate
+ * exists and parses, a computed age of at least 21.
+ */
+function isUser21Plus(profile: PopupTargetingProfile, now: Date): boolean {
+  if (profile.idAdult !== true) return false;
+  if (profile.dob) {
+    const age = computeAgeInYears(profile.dob, now);
+    if (age !== null && age < 21) return false;
+  }
+  return true;
+}
+
+/** Same tier names the Notification function targets. */
+const POPUP_TIER_AUDIENCE_MAP: Record<
+  'Tier1' | 'Tier2' | 'Tier3' | 'Tier4' | 'Tier5',
+  string
+> = {
+  Tier1: 'NewbieSampler',
+  Tier2: 'SampleFan',
+  Tier3: 'SuperSampler',
+  Tier4: 'VIS',
+  Tier5: 'SampleMaster',
+};
+
+const POPUP_NEW_USERS_DEFAULT_DAYS = 30;
+
+/** Serve-time inversion of the notification audience resolution: does THIS user match? */
+function popupAudienceMatches(
+  popup: PopupDocument,
+  profile: PopupTargetingProfile,
+  now: Date
+): boolean {
+  const audience = popup.targetAudience || 'All';
+  switch (audience) {
+    case 'All':
+      return true;
+    case 'NewUsers': {
+      const days =
+        typeof popup.newUsersTimeRange === 'number' && popup.newUsersTimeRange > 0
+          ? popup.newUsersTimeRange
+          : POPUP_NEW_USERS_DEFAULT_DAYS;
+      const cutoffMs = now.getTime() - days * 24 * 60 * 60 * 1000;
+      const createdMs = new Date(profile.$createdAt).getTime();
+      return Number.isFinite(createdMs) && createdMs >= cutoffMs;
+    }
+    case 'BrandAmbassadors':
+      return profile.isAmbassador === true;
+    case 'Influencers':
+      return profile.isInfluencer === true;
+    case 'Tier1':
+    case 'Tier2':
+    case 'Tier3':
+    case 'Tier4':
+    case 'Tier5':
+      return (profile.tierLevel || 'NewbieSampler') === POPUP_TIER_AUDIENCE_MAP[audience];
+    case 'ZipCode':
+      return (
+        Array.isArray(popup.selectedZipCodes) &&
+        !!profile.zipCode &&
+        popup.selectedZipCodes.includes(profile.zipCode)
+      );
+    case 'Targeted':
+      return (
+        Array.isArray(popup.selectedUserIds) &&
+        popup.selectedUserIds.includes(profile.$id)
+      );
+    default: {
+      // Exhaustiveness guard: every PopupAudience must be handled above, so a new
+      // enum value fails the build here instead of silently serving to nobody.
+      // Unknown runtime values still fall through to the safe "no match" default.
+      const _exhaustive: never = audience;
+      void _exhaustive;
+      return false;
+    }
+  }
+}
+
+function extractRelId(ref: string | { $id?: string } | undefined): string | undefined {
+  if (!ref) return undefined;
+  return typeof ref === 'string' ? ref : ref.$id;
+}
+
+/**
+ * Gates a single popup for a user, deliberately excluding the already-served-today
+ * rule — that rule belongs to the caller. A fetch filters on it; a view report uses
+ * it as an idempotency key instead, so a repeat view is a no-op rather than a refusal.
+ */
+function popupIsEligibleForUser(
+  popup: PopupDocument,
+  profile: PopupTargetingProfile,
+  now: Date
+): boolean {
+  const nowMs = now.getTime();
+  if (new Date(popup.startDate).getTime() > nowMs) return false;
+  if (new Date(popup.endDate).getTime() < nowMs) return false;
+  // only21Plus defaults to true; treat missing as gated (safe default for ads).
+  if (popup.only21Plus !== false && !isUser21Plus(profile, now)) return false;
+  return popupAudienceMatches(popup, profile, now);
+}
+
+/**
+ * Does this recorded impression still count as "already served today"?
+ *
+ * An admin can re-open a campaign to users who have already seen it ("Show again"), at two
+ * scopes: `popups.interactionsResetAt` re-opens it for everyone in a single write, and a
+ * row's own `resetAt` re-opens it for that one user. Nothing is ever deleted, so the report
+ * keeps every impression it has already counted and a user shown a banner twice counts twice.
+ *
+ * Every place that asks "has this user seen it today?" must agree on this answer, or the
+ * pop-up is served forever: the view report would keep finding the reset row, call it a
+ * duplicate, and never write the fresh row the fetch gate is waiting for.
+ *
+ * Timestamps are parsed rather than compared as strings: `shownAt` and `interactionsResetAt`
+ * both come back from Appwrite, but a column default or a hand-written value can carry a
+ * different offset spelling, and lexicographic order is wrong across formats.
+ */
+function interactionCountsAsServed(
+  row: PopupInteractionRow,
+  popup: PopupDocument
+): boolean {
+  if (row.resetAt) return false;
+  if (popup.interactionsResetAt && row.shownAt) {
+    const resetAtMs = Date.parse(popup.interactionsResetAt);
+    const shownAtMs = Date.parse(row.shownAt);
+    if (Number.isFinite(resetAtMs) && Number.isFinite(shownAtMs) && shownAtMs < resetAtMs) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** Newest first, so a click lands on the impression it belongs to. */
+function sortRowsByShownAtDesc(rows: PopupInteractionRow[]): PopupInteractionRow[] {
+  return [...rows].sort(
+    (a, b) => (Date.parse(b.shownAt ?? '') || 0) - (Date.parse(a.shownAt ?? '') || 0)
+  );
+}
+
+/**
+ * Drop pop-ups whose in-app destination the app cannot open.
+ *
+ * The client's `fetchEventById` returns null for an archived or hidden event, so the CTA
+ * navigates to a dead "Event not found" screen. The admin picker refuses to select such an
+ * event, but that is not enough on its own: an event can be archived, hidden or deleted long
+ * after the pop-up was saved. Enforcing it here also reaches builds already in the field,
+ * which no admin-side change can.
+ *
+ * The banner is dropped whole rather than served without its link — the tap is the entire
+ * point of an event pop-up, and a served banner costs an impression.
+ *
+ * One query resolves every distinct destination; `GET_ACTIVE_POPUPS_LIMIT` caps that at 100
+ * ids, well inside what an equality query accepts. If the events table cannot be read, the
+ * batch is served unchanged: a transient failure must not blank a live campaign.
+ */
+async function dropPopupsWithUnopenableEvent(
+  databases: Databases,
+  popups: PopupDocument[],
+  log: (message: string) => void
+): Promise<PopupDocument[]> {
+  const eventIds = [
+    ...new Set(
+      popups
+        .filter((p) => p.destinationType === 'event')
+        .map((p) => p.destinationEventId)
+        .filter((id): id is string => !!id)
+    ),
+  ];
+  if (eventIds.length === 0) return popups;
+
+  const openable = new Set<string>();
+  try {
+    const result = await databases.listDocuments(DATABASE_ID, EVENTS_TABLE_ID, [
+      Query.equal('$id', eventIds),
+      Query.equal('isArchived', false),
+      Query.equal('isHidden', false),
+      Query.limit(eventIds.length),
+    ]);
+    for (const row of result.documents) openable.add(row.$id);
+  } catch (err) {
+    log(`Could not verify pop-up destinations, serving them unchecked: ${String(err)}`);
+    return popups;
+  }
+
+  return popups.filter((popup) => {
+    if (popup.destinationType !== 'event') return true;
+    if (popup.destinationEventId && openable.has(popup.destinationEventId)) return true;
+    log(
+      `Dropping popup ${popup.$id}: destination event ${
+        popup.destinationEventId ?? '(unset)'
+      } is missing, archived or hidden`
+    );
+    return false;
+  });
+}
+
+/**
+ * Get pop-ups to show this user right now.
+ *
+ * When `clientReportsViews` is false (builds already in the field, which cannot
+ * report for themselves) serving still records the impression, as it always did.
+ * When true, this is a pure read: the client calls /record-popup-view once the
+ * banner is genuinely on screen, so a pop-up fetched but never displayed is no
+ * longer burned for the rest of the day.
+ */
+async function getActivePopups(
+  databases: Databases,
+  userId: string,
+  clientReportsViews: boolean,
+  log: (message: string) => void
+): Promise<ActivePopupResponse[]> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const dayKey = getPopupDayKey(now);
+
+  let profile: PopupTargetingProfile;
+  try {
+    profile = (await databases.getDocument(
+      DATABASE_ID,
+      USER_PROFILES_TABLE_ID,
+      userId
+    )) as unknown as PopupTargetingProfile;
+  } catch {
+    throw { code: 404, message: 'User not found' };
+  }
+
+  const [activePopupsResult, todaysInteractionsResult] = await Promise.all([
+    databases.listDocuments(DATABASE_ID, POPUPS_TABLE_ID, [
+      Query.lessThanEqual('startDate', nowIso),
+      Query.greaterThanEqual('endDate', nowIso),
+      // Oldest campaign first. Legacy builds are handed exactly one pop-up per
+      // fetch, so this ordering decides which one they get; leaving it to the
+      // backend's default ordering made that choice implicit.
+      Query.orderAsc('$createdAt'),
+      Query.limit(GET_ACTIVE_POPUPS_LIMIT),
+    ]),
+    databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
+      Query.equal('user', userId),
+      Query.equal('dayKey', dayKey),
+      Query.limit(POPUP_INTERACTIONS_TODAY_LIMIT),
+    ]),
+  ]);
+
+  log(
+    `Popups: ${activePopupsResult.total} active, user has ${todaysInteractionsResult.total} interactions for ${dayKey}`
+  );
+
+  // Grouped rather than reduced to a set of ids: whether a row closes today's door
+  // depends on the pop-up it belongs to (see interactionCountsAsServed).
+  const todaysRowsByPopup = new Map<string, PopupInteractionRow[]>();
+  for (const row of todaysInteractionsResult.documents as unknown as PopupInteractionRow[]) {
+    const popupId = extractRelId(row.popup);
+    if (!popupId) continue;
+    const rows = todaysRowsByPopup.get(popupId);
+    if (rows) rows.push(row);
+    else todaysRowsByPopup.set(popupId, [row]);
+  }
+
+  const user21Plus = isUser21Plus(profile, now);
+  const eligible: PopupDocument[] = [];
+  for (const popup of activePopupsResult.documents as unknown as PopupDocument[]) {
+    const todaysRows = todaysRowsByPopup.get(popup.$id);
+    if (todaysRows?.some((row) => interactionCountsAsServed(row, popup))) continue;
+    if (!popupIsEligibleForUser(popup, profile, now)) continue;
+    eligible.push(popup);
+  }
+
+  // Legacy clients only: serve == impression, so every pop-up handed over is
+  // consumed whether or not it reaches the screen. These builds render one at a
+  // time from an in-memory queue, so handing them the whole batch is what burned
+  // the rest of the day's pop-ups. Give them exactly one and let the next fetch
+  // deliver the next — slower, but nothing is lost. New clients report on display
+  // and get the full list.
+  // Before the slice below, not after: a pop-up pointing at an archived event would
+  // otherwise consume a legacy build's single pop-up per fetch and show nothing for it.
+  const deliverable = await dropPopupsWithUnopenableEvent(databases, eligible, log);
+
+  const served = clientReportsViews ? deliverable : deliverable.slice(0, 1);
+
+  if (!clientReportsViews) {
+    await Promise.allSettled(
+      served.map(async (popup) => {
+        try {
+          await databases.createDocument(
+            DATABASE_ID,
+            POPUP_INTERACTIONS_TABLE_ID,
+            ID.unique(),
+            {
+              popup: popup.$id,
+              user: userId,
+              dayKey,
+              shownAt: nowIso,
+              is21Plus: user21Plus,
+            }
+          );
+          await databases.updateDocument(DATABASE_ID, POPUPS_TABLE_ID, popup.$id, {
+            views: (popup.views ?? 0) + 1,
+          });
+        } catch (err) {
+          log(`Failed to record popup serve for ${popup.$id}: ${String(err)}`);
+        }
+      })
+    );
+  }
+
+  log(
+    `Returning ${served.length} of ${eligible.length} eligible popups (${
+      eligible.length - deliverable.length
+    } dropped for an unopenable destination) (${
+      clientReportsViews ? 'client reports views' : 'legacy: one per fetch, recorded on serve'
+    })`
+  );
+
+  return served.map((p) => ({
+    $id: p.$id,
+    title: p.title ?? null,
+    imageUrl: p.imageUrl,
+    link: p.link ?? null,
+    description: p.description ?? null,
+    destinationType: p.destinationType === 'event' ? 'event' : 'external',
+    destinationEventId:
+      p.destinationType === 'event' ? p.destinationEventId ?? null : null,
+  }));
+}
+
+/**
+ * Record that a pop-up was actually displayed. Idempotent per user/popup/day:
+ * an existing row IS the dedup key, so a re-render or a retry cannot double-count.
+ */
+async function recordPopupView(
+  databases: Databases,
+  userId: string,
+  popupId: string,
+  log: (message: string) => void
+): Promise<{ alreadyViewed: boolean }> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const dayKey = getPopupDayKey(now);
+
+  let profile: PopupTargetingProfile;
+  try {
+    profile = (await databases.getDocument(
+      DATABASE_ID,
+      USER_PROFILES_TABLE_ID,
+      userId
+    )) as unknown as PopupTargetingProfile;
+  } catch {
+    throw { code: 404, message: 'User not found' };
+  }
+
+  let popup: PopupDocument;
+  try {
+    popup = (await databases.getDocument(
+      DATABASE_ID,
+      POPUPS_TABLE_ID,
+      popupId
+    )) as unknown as PopupDocument;
+  } catch {
+    throw { code: 404, message: 'Popup not found' };
+  }
+
+  // Never take the client's word that this pop-up was theirs to see.
+  if (!popupIsEligibleForUser(popup, profile, now)) {
+    throw { code: 403, message: 'Popup is not eligible for this user' };
+  }
+
+  // Every row for today, not just the first: after a "Show again" the user legitimately has
+  // more than one, and only the ones that still count make this a duplicate.
+  const existing = await databases.listDocuments(
+    DATABASE_ID,
+    POPUP_INTERACTIONS_TABLE_ID,
+    [
+      Query.equal('user', userId),
+      Query.equal('popup', popupId),
+      Query.equal('dayKey', dayKey),
+      Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
+    ]
+  );
+
+  const alreadyCounted = (
+    existing.documents as unknown as PopupInteractionRow[]
+  ).some((row) => interactionCountsAsServed(row, popup));
+
+  if (alreadyCounted) {
+    log(`Popup ${popupId} already recorded for ${userId} on ${dayKey}`);
+    return { alreadyViewed: true };
+  }
+
+  await databases.createDocument(
+    DATABASE_ID,
+    POPUP_INTERACTIONS_TABLE_ID,
+    ID.unique(),
+    {
+      popup: popupId,
+      user: userId,
+      dayKey,
+      shownAt: nowIso,
+      is21Plus: isUser21Plus(profile, now),
+    }
+  );
+  await databases.updateDocument(DATABASE_ID, POPUPS_TABLE_ID, popupId, {
+    views: (popup.views ?? 0) + 1,
+  });
+
+  log(`Recorded popup view ${popupId} for ${userId} on ${dayKey}`);
+  return { alreadyViewed: false };
+}
+
+/**
+ * Record a banner tap. `clicks` on the popup doc counts UNIQUE clickers:
+ * it is incremented only when this user has never clicked this popup before.
+ */
+async function recordPopupClick(
+  databases: Databases,
+  userId: string,
+  popupId: string,
+  log: (message: string) => void
+): Promise<{ alreadyClicked: boolean }> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const dayKey = getPopupDayKey(now);
+
+  let profile: PopupTargetingProfile;
+  try {
+    profile = (await databases.getDocument(
+      DATABASE_ID,
+      USER_PROFILES_TABLE_ID,
+      userId
+    )) as unknown as PopupTargetingProfile;
+  } catch {
+    throw { code: 404, message: 'User not found' };
+  }
+
+  let popup: PopupDocument;
+  try {
+    popup = (await databases.getDocument(
+      DATABASE_ID,
+      POPUPS_TABLE_ID,
+      popupId
+    )) as unknown as PopupDocument;
+  } catch {
+    throw { code: 404, message: 'Popup not found' };
+  }
+
+  const [previousClicksResult, todaysRowsResult] = await Promise.all([
+    databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
+      Query.equal('user', userId),
+      Query.equal('popup', popupId),
+      Query.equal('clicked', true),
+      Query.limit(1),
+    ]),
+    databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
+      Query.equal('user', userId),
+      Query.equal('popup', popupId),
+      Query.equal('dayKey', dayKey),
+      Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
+    ]),
+  ]);
+
+  const hadClickedBefore = previousClicksResult.total > 0;
+  // The click belongs to the impression the user is looking at, which is the newest row that
+  // still counts. A row left behind by a "Show again" must not absorb it, or the click would
+  // be attached to a banner the user closed hours ago.
+  const todaysRow = sortRowsByShownAtDesc(
+    (todaysRowsResult.documents as unknown as PopupInteractionRow[]).filter((row) =>
+      interactionCountsAsServed(row, popup)
+    )
+  )[0];
+
+  if (todaysRow) {
+    if (todaysRow.clicked !== true) {
+      await databases.updateDocument(
+        DATABASE_ID,
+        POPUP_INTERACTIONS_TABLE_ID,
+        todaysRow.$id,
+        { clicked: true, clickedAt: nowIso }
+      );
+    }
+  } else {
+    // No row this click can belong to: the app-TZ day rolled over while the modal stayed
+    // open, or a "Show again" retired today's row. Record the click on a fresh row rather
+    // than losing it.
+    await databases.createDocument(
+      DATABASE_ID,
+      POPUP_INTERACTIONS_TABLE_ID,
+      ID.unique(),
+      {
+        popup: popupId,
+        user: userId,
+        dayKey,
+        shownAt: nowIso,
+        clicked: true,
+        clickedAt: nowIso,
+        is21Plus: isUser21Plus(profile, now),
+      }
+    );
+  }
+
+  if (!hadClickedBefore) {
+    await databases.updateDocument(DATABASE_ID, POPUPS_TABLE_ID, popupId, {
+      clicks: (popup.clicks ?? 0) + 1,
+    });
+    log(`First click by user ${userId} on popup ${popupId}; clicks incremented`);
+  }
+
+  return { alreadyClicked: hadClickedBefore };
+}
+
+/**
+ * Re-open a campaign to users who have already seen it today ("Show again" in the admin).
+ *
+ * Two scopes share one meaning — "impressions older than this no longer close today's door":
+ *  - without a userId, one write on the pop-up itself, so the cost is the same whether ten
+ *    users or ten thousand have seen it, and no viewer's row has to be touched;
+ *  - with a userId, that user's rows for today are stamped instead and nobody else is
+ *    affected.
+ *
+ * The pop-up-level marker needs no cleanup: tomorrow's rows are newer than it, so it stops
+ * mattering by itself once the day rolls over.
+ */
+async function resetPopupInteractions(
+  databases: Databases,
+  popupId: string,
+  userId: string | undefined,
+  log: (message: string) => void
+): Promise<{ scope: 'all' | 'user'; affected: number }> {
+  const now = new Date();
+  const nowIso = now.toISOString();
+
+  try {
+    await databases.getDocument(DATABASE_ID, POPUPS_TABLE_ID, popupId);
+  } catch {
+    throw { code: 404, message: 'Popup not found' };
+  }
+
+  if (!userId) {
+    await databases.updateDocument(DATABASE_ID, POPUPS_TABLE_ID, popupId, {
+      interactionsResetAt: nowIso,
+    });
+    log(`Popup ${popupId} re-opened for every user as of ${nowIso}`);
+    return { scope: 'all', affected: 1 };
+  }
+
+  const dayKey = getPopupDayKey(now);
+  const rows = await databases.listDocuments(
+    DATABASE_ID,
+    POPUP_INTERACTIONS_TABLE_ID,
+    [
+      Query.equal('user', userId),
+      Query.equal('popup', popupId),
+      Query.equal('dayKey', dayKey),
+      Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
+    ]
+  );
+
+  let affected = 0;
+  for (const row of rows.documents as unknown as PopupInteractionRow[]) {
+    // Already retired: leave the original timestamp, which is when it was actually retired.
+    if (row.resetAt) continue;
+    await databases.updateDocument(
+      DATABASE_ID,
+      POPUP_INTERACTIONS_TABLE_ID,
+      row.$id,
+      { resetAt: nowIso }
+    );
+    affected++;
+  }
+
+  log(
+    `Popup ${popupId} re-opened for user ${userId}: ${affected} of ${rows.total} row(s) for ${dayKey} retired`
+  );
+  return { scope: 'user', affected };
+}
+
+/**
+ * Gate for endpoints only the admin panel may call.
+ *
+ * This function's execute permission is `any`, which is what the mobile app's own session
+ * calls need, but it would also let anyone on the internet replay a campaign. Appwrite passes
+ * the caller's id in `x-appwrite-user-id` for a session-authenticated execution and leaves it
+ * empty otherwise, so the caller's `admin` label — the same label the popups table itself is
+ * permissioned on — is the check. Scoped deliberately to the new endpoint: the existing ones
+ * are unchanged.
+ */
+async function requireAdminCaller(
+  users: Users,
+  headers: Record<string, string>,
+  log: (message: string) => void
+): Promise<void> {
+  const callerId = headers['x-appwrite-user-id'];
+  if (!callerId) {
+    // Says which half failed: an anonymous call, versus a signed-in caller without the label.
+    log('Rejected admin-only request: no x-appwrite-user-id header on the execution');
+    throw { code: 401, message: 'Authentication required' };
+  }
+
+  let labels: string[] = [];
+  try {
+    const caller = await users.get(callerId);
+    labels = caller.labels ?? [];
+  } catch {
+    throw { code: 401, message: 'Authentication required' };
+  }
+
+  if (!labels.includes('admin')) {
+    log(
+      `Rejected admin-only request from ${callerId} (labels: ${
+        labels.join(', ') || 'none'
+      })`
+    );
+    throw { code: 403, message: 'Admin access required' };
+  }
 }
 
 // ============================================================================
@@ -1974,6 +2721,137 @@ export default async function handler({
           log
         );
         return res.json({ success: true, ...dismissResult });
+      } catch (err: unknown) {
+        const typedErr = err as { code?: number; message?: string };
+        if (typedErr.code != null && typedErr.message) {
+          return res.json(
+            { success: false, error: typedErr.message },
+            typedErr.code
+          );
+        }
+        throw err;
+      }
+    }
+
+    // ========================================================================
+    // POPUP ENDPOINTS (SAM-5)
+    // ========================================================================
+
+    // GET active popups for user (serving also records the impression)
+    if (req.path === '/get-active-popups' && req.method === 'POST') {
+      log('Processing get-active-popups request');
+
+      const body = req.body as GetActivePopupsRequest;
+
+      if (!body || !body.userId) {
+        return res.json({ success: false, error: 'userId is required' }, 400);
+      }
+
+      try {
+        const popups = await getActivePopups(
+          databases,
+          body.userId,
+          body.clientReportsViews === true,
+          log
+        );
+        return res.json({ success: true, popups, count: popups.length });
+      } catch (err: unknown) {
+        const typedErr = err as { code?: number; message?: string };
+        if (typedErr.code != null && typedErr.message) {
+          return res.json(
+            { success: false, error: typedErr.message },
+            typedErr.code
+          );
+        }
+        throw err;
+      }
+    }
+
+    // RECORD popup view (banner actually rendered on screen)
+    if (req.path === '/record-popup-view' && req.method === 'POST') {
+      log('Processing record-popup-view request');
+
+      const body = req.body as RecordPopupViewRequest;
+
+      if (!body || !body.userId) {
+        return res.json({ success: false, error: 'userId is required' }, 400);
+      }
+      if (!body.popupId) {
+        return res.json({ success: false, error: 'popupId is required' }, 400);
+      }
+
+      try {
+        const result = await recordPopupView(
+          databases,
+          body.userId,
+          body.popupId,
+          log
+        );
+        return res.json({ success: true, ...result });
+      } catch (err: unknown) {
+        const typedErr = err as { code?: number; message?: string };
+        if (typedErr.code != null && typedErr.message) {
+          return res.json(
+            { success: false, error: typedErr.message },
+            typedErr.code
+          );
+        }
+        throw err;
+      }
+    }
+
+    // RECORD popup click (banner tapped; opens link in browser client-side)
+    if (req.path === '/record-popup-click' && req.method === 'POST') {
+      log('Processing record-popup-click request');
+
+      const body = req.body as RecordPopupClickRequest;
+
+      if (!body || !body.userId) {
+        return res.json({ success: false, error: 'userId is required' }, 400);
+      }
+      if (!body.popupId) {
+        return res.json({ success: false, error: 'popupId is required' }, 400);
+      }
+
+      try {
+        const result = await recordPopupClick(
+          databases,
+          body.userId,
+          body.popupId,
+          log
+        );
+        return res.json({ success: true, ...result });
+      } catch (err: unknown) {
+        const typedErr = err as { code?: number; message?: string };
+        if (typedErr.code != null && typedErr.message) {
+          return res.json(
+            { success: false, error: typedErr.message },
+            typedErr.code
+          );
+        }
+        throw err;
+      }
+    }
+
+    // RESET popup interactions ("Show again"): admin-only, everyone or one user
+    if (req.path === '/reset-popup-interactions' && req.method === 'POST') {
+      log('Processing reset-popup-interactions request');
+
+      const body = req.body as ResetPopupInteractionsRequest;
+
+      if (!body || !body.popupId) {
+        return res.json({ success: false, error: 'popupId is required' }, 400);
+      }
+
+      try {
+        await requireAdminCaller(users, req.headers, log);
+        const result = await resetPopupInteractions(
+          databases,
+          body.popupId,
+          body.userId,
+          log
+        );
+        return res.json({ success: true, ...result });
       } catch (err: unknown) {
         const typedErr = err as { code?: number; message?: string };
         if (typedErr.code != null && typedErr.message) {
