@@ -18,6 +18,7 @@ import {
   getDateStringInTimezone,
 } from '../../../lib/dateUtils'
 import { getEventStatus, getEventStatusColor } from '../../../lib/eventUtils'
+import { useDropdownPlacement } from '../../../hooks/useDropdownPlacement'
 import { useTimezoneStore } from '../../../stores/timezoneStore'
 import PreviewPopupModal from './PreviewPopupModal'
 
@@ -179,7 +180,16 @@ export const PopupFormFields = ({
   const [eventSearchQuery, setEventSearchQuery] = useState('')
   const [showEventDropdown, setShowEventDropdown] = useState(false)
   const eventDropdownRef = useRef<HTMLDivElement>(null)
+  const eventMenuRef = useRef<HTMLDivElement>(null)
+  const userDropdownRef = useRef<HTMLDivElement>(null)
+  const userMenuRef = useRef<HTMLDivElement>(null)
   const { appTimezone } = useTimezoneStore()
+
+  // Both pickers sit low in a form that scrolls inside a 90vh modal — the user one lowest of
+  // all, and pushed lower still by every selected-user chip above it. Opening downward from
+  // there puts the list past the bottom of the modal.
+  const eventMenuUpward = useDropdownPlacement(showEventDropdown, eventDropdownRef, eventMenuRef)
+  const userMenuUpward = useDropdownPlacement(showUserDropdown, userDropdownRef, userMenuRef)
 
   useEffect(() => {
     const fetchUsers = async () => {
@@ -495,7 +505,12 @@ export const PopupFormFields = ({
               </button>
 
               {showEventDropdown && (
-                <div className="absolute z-10 mt-1 w-full rounded-lg border border-gray-300 bg-white shadow-lg">
+                <div
+                  ref={eventMenuRef}
+                  className={`absolute z-10 w-full rounded-lg border border-gray-300 bg-white shadow-lg ${
+                    eventMenuUpward ? 'bottom-full mb-1' : 'top-full mt-1'
+                  }`}
+                >
                   <div className="border-b border-gray-200 p-2">
                     <input
                       type="text"
@@ -735,7 +750,7 @@ export const PopupFormFields = ({
               })}
             </div>
           )}
-          <div className="relative popup-user-dropdown-container">
+          <div className="relative popup-user-dropdown-container" ref={userDropdownRef}>
             <input
               type="text"
               placeholder="Search users by name, email or username..."
@@ -746,7 +761,12 @@ export const PopupFormFields = ({
               className={inputClass}
             />
             {showUserDropdown && (
-              <div className="absolute z-10 w-full mt-1 bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+              <div
+                ref={userMenuRef}
+                className={`absolute z-10 w-full bg-white border border-gray-300 rounded-lg shadow-lg max-h-60 overflow-y-auto ${
+                  userMenuUpward ? 'bottom-full mb-1' : 'top-full mt-1'
+                }`}
+              >
                 {loadingUsers ? (
                   <div className="px-4 py-3 text-center text-gray-500">
                     <Icon icon="mdi:loading" className="w-5 h-5 animate-spin mx-auto" />
