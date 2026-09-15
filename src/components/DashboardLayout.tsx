@@ -62,6 +62,7 @@ const DashboardLayout = ({ children }: DashboardLayoutProps) => {
     { path: '/reports', label: 'Reports', icon: 'mdi:clipboard-check-outline' },
     { path: '/notification-settings', label: 'Notification Settings', icon: 'mdi:bell-outline' },
     { path: '/trivia', label: 'Trivia', icon: 'mdi:school-outline' },
+    { path: '/popups', label: 'Pop-ups', icon: 'mdi:image-multiple-outline' },
   ]
 
   const isActive = (path: string) => {

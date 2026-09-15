@@ -1,6 +1,6 @@
 import { Icon } from '@iconify/react'
 
-export type ConfirmationType = 'delete' | 'archive' | 'unarchive' | 'hide' | 'unhide' | 'block' | 'unblock'
+export type ConfirmationType = 'delete' | 'archive' | 'unarchive' | 'hide' | 'unhide' | 'block' | 'unblock' | 'reshow'
 
 interface ConfirmationModalProps {
   isOpen: boolean
@@ -92,6 +92,17 @@ const ConfirmationModal = ({
       defaultMessage: `This ${itemName} will be added to blacklist, logged out immediately, and prevented from logging in until unblocked.`,
       confirmText: 'Yes, block',
       loadingText: 'Blocking...',
+    },
+    reshow: {
+      icon: 'mdi:refresh',
+      iconColor: 'text-[#1D0A74]',
+      iconBg: 'bg-[#1D0A74]/5',
+      buttonBg: 'bg-[#1D0A74] hover:bg-[#15065c]',
+      buttonBgDisabled: 'bg-[#2D1A84]',
+      defaultTitle: `Show this ${itemName} again?`,
+      defaultMessage: `Anyone who has already seen this ${itemName} today will see it once more.`,
+      confirmText: 'Yes, show again',
+      loadingText: 'Re-opening...',
     },
     unblock: {
       icon: 'mdi:lock-open',

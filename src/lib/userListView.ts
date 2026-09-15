@@ -102,7 +102,7 @@ function matchesSearch<T extends UserListRow>(user: T, trimmedSearch: string): b
 }
 
 /** Missing values sort last in BOTH directions, so blanks never displace real data. */
-function compareWithBlanksLast(
+export function compareWithBlanksLast(
   aBlank: boolean,
   bBlank: boolean
 ): number | null {
