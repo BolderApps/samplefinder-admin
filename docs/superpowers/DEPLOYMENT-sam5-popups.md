@@ -17,20 +17,46 @@ verify stats *immediately after* deploying the Statistics function).
 | Component | Where | Change |
 |---|---|---|
 | Schema | `appwrite.config.json` | new tables `popups`, `popup_interactions`; tightened `popups`/`trivia` permissions |
-| Mobile API function | `appwrite/functions/Mobile API` (id `69308117000e7a96bcbb`) | `/get-active-popups`, `/record-popup-click` |
-| Statistics function | `appwrite/functions/Statistics functions` (id `69341ffa001a4ebd28c2`) | `popups` stats page |
+| Mobile API function | `appwrite/functions/Mobile API` (id `69308117000e7a96bcbb`) | `/get-active-popups`, `/record-popup-view`, `/record-popup-click`, `/reset-popup-interactions` |
+| Statistics function | `appwrite/functions/Statistics functions` (id `69341ffa001a4ebd28c2`) | `popups` stats page; per-user viewer rollup (SAM-12) |
 | Admin dashboard | `samplefinder-admin` web app | Pop-ups list / create / edit / details pages |
 | Mobile app | `samplefinder-app` | queued pop-up banner modal |
 
 - **Database id:** `69217af50038b9005a61`
-- **Branches (both):** `qudratillo/sam-5-pop-ups-in-the-application` — admin & app, one squashed commit each, rebased on latest `main`.
-- **Backward compatible:** older mobile app builds simply never call the new routes; deploying the backend first is safe.
+- **Branches (both):** `feature/SAM-5/popups` — admin is 2 commits ahead of `main` (the
+  feature, plus a staging-tooling fix), app is 1.
+- **Backward compatible** — checked against the diff, not assumed. The Mobile API change is
+  878 insertions and **0 deletions**: no line an existing build depends on was modified, and
+  older builds never call the new routes. The Statistics function removed 3 lines, all of
+  them the `page` union and two error strings widened to accept `'popups'`. Deploying both
+  functions ahead of either client is safe.
+
+> ### ⚠️ TestFlight builds hit PRODUCTION
+>
+> `babel.config.js` selects `.env.staging` only when `APP_VARIANT=staging`, and the only
+> script that sets it is `start:staging` (the dev server). There is no staging *build*
+> script, and releases are built locally with `xcodebuild` / `gradlew`. A TestFlight build
+> made the normal way therefore reads `.env`, which points at the **production** project
+> `691d4a54003b21bf0136`.
+>
+> So "ship to TestFlight first" is not a staging test. Pop-ups cannot be exercised there
+> until the prod schema and Mobile API are live — and the moment they are, they are live for
+> every existing App Store user too. That is safe (see the compatibility note above), but it
+> should be a decision rather than a surprise. A genuine staging test needs an
+> `APP_VARIANT=staging` build, which has no script today.
 
 ---
 
 ## Prerequisites
 
-- **Appwrite CLI** installed and authenticated (`appwrite login`) against the correct project. (A newer CLI is fine; verify subcommands with `appwrite push --help` — this repo pushes from `appwrite.config.json`.)
+- **Appwrite CLI** installed and authenticated (`appwrite login`).
+  ⚠️ **The CLI takes its target project from no environment variable.** It reads
+  `appwrite.config.json` first and only then `~/.appwrite/prefs.json`; `APPWRITE_ENDPOINT` /
+  `APPWRITE_PROJECT` / `APPWRITE_KEY` are ignored entirely by v22. The committed config
+  carries the **production** project id, so a plain `appwrite push …` from this repo targets
+  **prod** — which is what this guide wants, and exactly what you must never assume when
+  aiming at staging. For staging use `appwrite/staging-cli.sh`, which swaps the id for the
+  duration of one command and restores it.
 - **A server API key** with these scopes, exported as `APPWRITE_API_KEY` for the labeler script: `users.read`, `users.write`, and `rows.read` on `user_profiles`. **Never commit this key or put it in any client env.**
 - **Admin `.env`** (build-time, admin web): optionally add `VITE_APPWRITE_COLLECTION_POPUPS=popups` for explicitness (it already defaults to `popups`). No other new admin env var is required.
 - **Mobile `.env`:** no new variable — the app reaches the new routes through the existing `APPWRITE_EVENTS_FUNCTION_ID` (the Mobile API function).
@@ -44,9 +70,9 @@ verify stats *immediately after* deploying the Statistics function).
 ```bash
 cd samplefinder-admin
 
-# You are on the feature branch, one commit ahead of the latest main:
-git branch --show-current            # → qudratillo/sam-5-pop-ups-in-the-application
-git log --oneline origin/main..HEAD  # → exactly 1 commit
+# You are on the feature branch:
+git branch --show-current            # → feature/SAM-5/popups
+git log --oneline origin/main..HEAD  # → 2 commits (feature + staging-cli fix)
 git status --porcelain               # → clean
 
 # Full build + lint (typechecks the whole admin app):
@@ -96,25 +122,67 @@ See the [hardening runbook](./RUNBOOK-popup-trivia-perms-hardening.md) for detai
 
 ---
 
-## Phase 2 — Push schema (tables + tightened permissions)
+## Phase 2 — Create the schema (tables + permissions)
 
-```bash
-cd samplefinder-admin/appwrite
+> ### 🚫 Do NOT run `appwrite push tables`
+>
+> An earlier version of this guide said to run
+> `appwrite push tables --table-id popups --table-id popup_interactions`. **That command is
+> unsafe and must not be run against any live project.** CLI v22 ignores `--table-id` and
+> pushes *every* table in `appwrite.config.json`, rewriting the columns of all 14 live prod
+> tables — shrinking `size` values and re-enum-ifying attributes against whatever the
+> committed config happens to say. `appwrite/staging-cli.sh` now refuses these subcommands
+> outright.
+>
+> Create the two tables **by hand in the Appwrite console** instead. This is also how they
+> were created on staging.
 
-# New tables:
-appwrite push tables --table-id popups --table-id popup_interactions
+Create in database `69217af50038b9005a61`:
 
-# Tightened permissions on popups (and trivia):
-appwrite push tables --table-id popups --table-id trivia
-```
+**`popups`** — permissions `create/read/update/delete("label:admin")`
 
-- You can push all in one `appwrite push tables --table-id popups --table-id popup_interactions --table-id trivia` if preferred.
-- `trivia` permission tightening is **separable** — to defer it, omit `--table-id trivia` now and push it later (the code doesn't depend on it).
-- Verify no indexes were expected (there are none in v1, by design).
+| Column | Type | Notes |
+|---|---|---|
+| `title` | string(200) | optional |
+| `description` | string(1000) | optional |
+| `imageUrl` | string(2000) | **required** |
+| `imageFileId` | string(100) | **required** |
+| `link` | string(2000) | optional |
+| `startDate` / `endDate` | datetime | **required** |
+| `only21Plus` | boolean | optional, default `true` |
+| `targetAudience` | enum | **required** — All, NewUsers, BrandAmbassadors, Influencers, Tier1–5, ZipCode, Targeted |
+| `selectedUserIds` | string(1000)[] | optional array |
+| `selectedZipCodes` | string(1000)[] | optional array |
+| `newUsersTimeRange` | integer | optional |
+| `destinationType` | string(64) | optional — `external` \| `event`; absent reads as external |
+| `destinationEventId` | string(64) | optional |
+| `views` / `clicks` | integer | optional, default `0` |
+| `interactionsResetAt` | datetime | optional |
+
+**`popup_interactions`** — permissions **empty** (deliberately: only the functions' API key
+touches this table; clients write through the Mobile API, never directly)
+
+| Column | Type | Notes |
+|---|---|---|
+| `popup` | relationship → `popups` | optional |
+| `user` | relationship → `user_profiles` | optional |
+| `dayKey` | string(10) | **required** — Eastern calendar day, `YYYY-MM-DD` |
+| `shownAt` | datetime | **required** |
+| `clicked` | boolean | optional, default `false` |
+| `clickedAt` | datetime | optional |
+| `resetAt` | datetime | optional |
+| `is21Plus` | boolean | optional, default `false` |
+
+- **No indexes in v1, by design** — but see the index note under *Operational notes* before
+  a full App Store rollout.
+- **Defer the `trivia` permission tightening.** `trivia` is already live in prod; switching
+  it to `label:admin` locks out any admin not carrying the label. It is separable and the
+  pop-up code does not depend on it. If you do want it, complete Phase 1 first and change
+  the permissions in the console — not via `push tables`.
 
 **Immediately verify (as a labeled admin, in the dashboard):** create/edit/delete a popup
-**and** a trivia; confirm both list pages load. A `401`/`403` on a write means that admin
-isn't labeled — re-run Phase 1 for them.
+and confirm the list page loads. A `401`/`403` on a write means that admin isn't labeled —
+re-run Phase 1 for them. If you also tightened `trivia`, check it the same way.
 
 ---
 
@@ -127,6 +195,16 @@ cd samplefinder-admin/appwrite
 appwrite push functions --function-id 69308117000e7a96bcbb   # Mobile API
 appwrite push functions --function-id 69341ffa001a4ebd28c2   # Statistics functions
 ```
+
+Unlike `push tables`, **`--function-id` is genuinely honoured** — the CLI only fans out to
+every function when `--all` is passed — so these two commands each deploy exactly one
+function. They land on the project named in `appwrite.config.json`, i.e. **prod**; for
+staging run them through `appwrite/staging-cli.sh`.
+
+`push functions` needs a console session (`appwrite login`), not just an API key. If you
+only have a key, deploy by POSTing a tarball to
+`/functions/{id}/deployments` with `activate=true` and the project id in the
+`X-Appwrite-Project` header — that route takes a key and cannot be mis-targeted by config.
 
 ### ⚠️ Statistics API-key deploy-gate — verify right after deploying
 
@@ -151,6 +229,11 @@ auto-injected `APPWRITE_FUNCTION_KEY`.
 ---
 
 ## Phase 4 — Deploy the clients
+
+**Order matters: the Statistics function (Phase 3) must be live before the admin build.**
+The admin tolerates the old function shape via `rollUpLegacyViewers`, so a wrong order
+degrades rather than breaks — but while that fallback is active the 1000-row cap counts raw
+sightings instead of users, and busy campaigns under-report.
 
 1. **Admin dashboard:** build and deploy from your shipping ref.
    ```bash
@@ -204,9 +287,9 @@ and the senior-qa report; audit trail in `.superpowers/sdd/progress.md`.) Priori
 
 Permissions-only and code-only changes; no destructive data migration.
 
-- **Permissions:** restore both tables to `create/read/update/delete("users")` and
-  `appwrite push tables --table-id popups --table-id trivia` (see runbook). Admin labels
-  left in place are harmless.
+- **Permissions:** restore both tables to `create/read/update/delete("users")` **in the
+  console** (see runbook). Do not use `appwrite push tables` — see the warning in Phase 2.
+  Admin labels left in place are harmless.
 - **Functions:** redeploy the previous function version from Appwrite's deployment history
   (or from `main` before this branch), for Mobile API and/or Statistics.
 - **Admin dashboard:** redeploy the previous build.
@@ -225,10 +308,20 @@ Permissions-only and code-only changes; no destructive data migration.
   design). After adding an admin, re-run `npm run label:admin-users` (idempotent) or add the
   `admin` label in the Appwrite console (Auth → user → Labels). Until then the new admin can
   log in but gets permission errors on popups/trivia.
-- **Impressions are counted at fetch time** (spec decision 9). On a trivia day a popup
-  fetched behind trivia is counted as an impression and consumes its once-per-day slot even
-  if the user quits before it displays. Reach can therefore read **slightly higher** than
-  actual views — keep this in mind when interpreting CTR.
+- **Impressions are counted on display, not at fetch.** (This reverses the original spec
+  decision 9; the old behaviour burned a pop-up the moment the app asked for one, so
+  anything the render gate held back — trivia, tier modals — was lost for the rest of the
+  Eastern day.) Current builds send `clientReportsViews` and report the sighting themselves
+  via `/record-popup-view`. **Builds already in the field** send no flag and keep the
+  write-on-fetch path, so their reach can still read slightly high; they are now served
+  exactly one pop-up per fetch, oldest campaign first, so delivery is FIFO by construction.
+- **"Impressions" counts every sighting; "Unique Users Shown" counts people** (SAM-12). The
+  two legitimately differ whenever someone saw a pop-up more than once — a repeat viewer is
+  one row in the viewer table carrying their own count, not several rows.
+- **`popup_interactions` has no indexes.** Every pop-up fetch and view-record scans the
+  table. That is invisible at TestFlight scale and a real problem at full App Store
+  rollout: add a compound index on `popup` + `user`, and `popup` + `$createdAt` for the
+  stats page, before wide release.
 - **Counters vs. rows:** the `views`/`clicks` counters on a popup doc are cheap
   approximations (non-atomic increments; a rare double-tap or cross-device race can drift).
   The **details page** figures (unique users shown, unique clickers, CTR) are computed from
