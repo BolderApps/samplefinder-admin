@@ -1890,7 +1890,10 @@
         },
         {
             "$id": "popup_interactions",
-            "$permissions": [],
+            "$permissions": [
+                "read(\"label:admin\")",
+                "delete(\"label:admin\")"
+            ],
             "databaseId": "69217af50038b9005a61",
             "name": "Popup Interactions",
             "enabled": true,

@@ -159,8 +159,21 @@ Create in database `69217af50038b9005a61`:
 | `views` / `clicks` | integer | optional, default `0` |
 | `interactionsResetAt` | datetime | optional |
 
-**`popup_interactions`** — permissions **empty** (deliberately: only the functions' API key
-touches this table; clients write through the Mobile API, never directly)
+**`popup_interactions`** — permissions `read("label:admin")`, `delete("label:admin")`. No
+create/update: clients write through the Mobile API's key, never directly.
+
+> ⚠️ **Do not strip these back to `[]`.** They were empty at launch, which broke pop-up
+> deletion in production with a bare `401 user_unauthorized`. `popup_interactions` holds a
+> `manyToOne` relationship to `popups` with `onDelete: cascade`, and utopia-php/database
+> runs that cascade through the **public** `find()` + `deleteDocument()` — no
+> `Authorization::skip()` (`Database.php`, `deleteCascade`, the `RELATION_MANY_TO_ONE`
+> branch). So an admin's *session* is permission-checked against this table, and with `[]`
+> the `find()` for the child rows throws before a single row is deleted. An API key papers
+> over it, because a key disables the check entirely — which is why every scripted test
+> passed and only the admin panel failed. Read is what fails first; delete is what fails
+> second. Both are required.
+>
+> Only pop-ups that had **impressions** were affected; one with no child rows deletes fine.
 
 | Column | Type | Notes |
 |---|---|---|
