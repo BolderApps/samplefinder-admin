@@ -891,7 +891,7 @@ async function getActivePopups(databases, userId, clientReportsViews, log) {
             Query.limit(GET_ACTIVE_POPUPS_LIMIT),
         ]),
         databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-            Query.equal('user', userId),
+            Query.equal('userId', userId),
             Query.equal('dayKey', dayKey),
             Query.limit(POPUP_INTERACTIONS_TODAY_LIMIT),
         ]),
@@ -901,7 +901,9 @@ async function getActivePopups(databases, userId, clientReportsViews, log) {
     // depends on the pop-up it belongs to (see interactionCountsAsServed).
     const todaysRowsByPopup = new Map();
     for (const row of todaysInteractionsResult.documents) {
-        const popupId = extractRelId(row.popup);
+        // Fall back to the relationship for any row written before the denormalised
+        // columns existed; the backfill covers those, this covers a torn deploy.
+        const popupId = row.popupId ?? extractRelId(row.popup);
         if (!popupId)
             continue;
         const rows = todaysRowsByPopup.get(popupId);
@@ -936,6 +938,8 @@ async function getActivePopups(databases, userId, clientReportsViews, log) {
                 await databases.createDocument(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, ID.unique(), {
                     popup: popup.$id,
                     user: userId,
+                    popupId: popup.$id,
+                    userId,
                     dayKey,
                     shownAt: nowIso,
                     is21Plus: user21Plus,
@@ -989,8 +993,8 @@ async function recordPopupView(databases, userId, popupId, log) {
     // Every row for today, not just the first: after a "Show again" the user legitimately has
     // more than one, and only the ones that still count make this a duplicate.
     const existing = await databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-        Query.equal('user', userId),
-        Query.equal('popup', popupId),
+        Query.equal('userId', userId),
+        Query.equal('popupId', popupId),
         Query.equal('dayKey', dayKey),
         Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
     ]);
@@ -1002,6 +1006,8 @@ async function recordPopupView(databases, userId, popupId, log) {
     await databases.createDocument(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, ID.unique(), {
         popup: popupId,
         user: userId,
+        popupId,
+        userId,
         dayKey,
         shownAt: nowIso,
         is21Plus: isUser21Plus(profile, now),
@@ -1036,14 +1042,14 @@ async function recordPopupClick(databases, userId, popupId, log) {
     }
     const [previousClicksResult, todaysRowsResult] = await Promise.all([
         databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-            Query.equal('user', userId),
-            Query.equal('popup', popupId),
+            Query.equal('userId', userId),
+            Query.equal('popupId', popupId),
             Query.equal('clicked', true),
             Query.limit(1),
         ]),
         databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-            Query.equal('user', userId),
-            Query.equal('popup', popupId),
+            Query.equal('userId', userId),
+            Query.equal('popupId', popupId),
             Query.equal('dayKey', dayKey),
             Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
         ]),
@@ -1065,6 +1071,8 @@ async function recordPopupClick(databases, userId, popupId, log) {
         await databases.createDocument(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, ID.unique(), {
             popup: popupId,
             user: userId,
+            popupId,
+            userId,
             dayKey,
             shownAt: nowIso,
             clicked: true,
@@ -1110,8 +1118,8 @@ async function resetPopupInteractions(databases, popupId, userId, log) {
     }
     const dayKey = getPopupDayKey(now);
     const rows = await databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-        Query.equal('user', userId),
-        Query.equal('popup', popupId),
+        Query.equal('userId', userId),
+        Query.equal('popupId', popupId),
         Query.equal('dayKey', dayKey),
         Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
     ]);

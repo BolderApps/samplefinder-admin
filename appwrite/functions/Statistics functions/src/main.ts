@@ -606,7 +606,9 @@ async function getPopupDetailStats(
       // Walking ascending and stopping at the cap would keep the oldest, which
       // is the opposite of what the admin table says it is showing.
       const queries = [
-        Query.equal('popup', popupId),
+        // `popupId` rather than the `popup` relationship: Appwrite will not index a
+        // relationship attribute, so only this form can use idx_popupid_created.
+        Query.equal('popupId', popupId),
         Query.orderDesc('$createdAt'),
         Query.limit(PAGE_SIZE),
       ];
@@ -622,6 +624,8 @@ async function getPopupDetailStats(
       for (const row of page.documents as unknown as Array<{
         $id: string;
         user?: string | { $id?: string };
+        /** Denormalised duplicate of `user`; see the query above. */
+        userId?: string;
         clicked?: boolean;
         is21Plus?: boolean;
         shownAt?: string | null;
@@ -630,7 +634,8 @@ async function getPopupDetailStats(
       }>) {
         totalImpressions++;
         const userRef = row.user;
-        const userId = typeof userRef === 'string' ? userRef : userRef?.$id;
+        const userId =
+          row.userId ?? (typeof userRef === 'string' ? userRef : userRef?.$id);
         if (!userId) continue;
         shownUsers.add(userId);
         if (row.clicked === true) {

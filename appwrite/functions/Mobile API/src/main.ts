@@ -190,6 +190,13 @@ interface PopupInteractionRow {
   $id: string;
   popup?: string | { $id?: string };
   user?: string | { $id?: string };
+  /**
+   * Plain-string duplicates of the two relationships above, written on every create.
+   * Appwrite refuses to index a relationship attribute, so these are what the queries
+   * filter on; `popup`/`user` stay because they carry the onDelete:cascade.
+   */
+  popupId?: string;
+  userId?: string;
   dayKey?: string;
   shownAt?: string;
   /** Set by "Show again" for one user: this impression no longer closes today's door. */
@@ -1555,7 +1562,7 @@ async function getActivePopups(
       Query.limit(GET_ACTIVE_POPUPS_LIMIT),
     ]),
     databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-      Query.equal('user', userId),
+      Query.equal('userId', userId),
       Query.equal('dayKey', dayKey),
       Query.limit(POPUP_INTERACTIONS_TODAY_LIMIT),
     ]),
@@ -1569,7 +1576,9 @@ async function getActivePopups(
   // depends on the pop-up it belongs to (see interactionCountsAsServed).
   const todaysRowsByPopup = new Map<string, PopupInteractionRow[]>();
   for (const row of todaysInteractionsResult.documents as unknown as PopupInteractionRow[]) {
-    const popupId = extractRelId(row.popup);
+    // Fall back to the relationship for any row written before the denormalised
+    // columns existed; the backfill covers those, this covers a torn deploy.
+    const popupId = row.popupId ?? extractRelId(row.popup);
     if (!popupId) continue;
     const rows = todaysRowsByPopup.get(popupId);
     if (rows) rows.push(row);
@@ -1608,6 +1617,8 @@ async function getActivePopups(
             {
               popup: popup.$id,
               user: userId,
+              popupId: popup.$id,
+              userId,
               dayKey,
               shownAt: nowIso,
               is21Plus: user21Plus,
@@ -1690,8 +1701,8 @@ async function recordPopupView(
     DATABASE_ID,
     POPUP_INTERACTIONS_TABLE_ID,
     [
-      Query.equal('user', userId),
-      Query.equal('popup', popupId),
+      Query.equal('userId', userId),
+      Query.equal('popupId', popupId),
       Query.equal('dayKey', dayKey),
       Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
     ]
@@ -1713,6 +1724,8 @@ async function recordPopupView(
     {
       popup: popupId,
       user: userId,
+      popupId,
+      userId,
       dayKey,
       shownAt: nowIso,
       is21Plus: isUser21Plus(profile, now),
@@ -1764,14 +1777,14 @@ async function recordPopupClick(
 
   const [previousClicksResult, todaysRowsResult] = await Promise.all([
     databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-      Query.equal('user', userId),
-      Query.equal('popup', popupId),
+      Query.equal('userId', userId),
+      Query.equal('popupId', popupId),
       Query.equal('clicked', true),
       Query.limit(1),
     ]),
     databases.listDocuments(DATABASE_ID, POPUP_INTERACTIONS_TABLE_ID, [
-      Query.equal('user', userId),
-      Query.equal('popup', popupId),
+      Query.equal('userId', userId),
+      Query.equal('popupId', popupId),
       Query.equal('dayKey', dayKey),
       Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
     ]),
@@ -1807,6 +1820,8 @@ async function recordPopupClick(
       {
         popup: popupId,
         user: userId,
+        popupId,
+        userId,
         dayKey,
         shownAt: nowIso,
         clicked: true,
@@ -1866,8 +1881,8 @@ async function resetPopupInteractions(
     DATABASE_ID,
     POPUP_INTERACTIONS_TABLE_ID,
     [
-      Query.equal('user', userId),
-      Query.equal('popup', popupId),
+      Query.equal('userId', userId),
+      Query.equal('popupId', popupId),
       Query.equal('dayKey', dayKey),
       Query.limit(POPUP_USER_DAY_ROWS_LIMIT),
     ]
