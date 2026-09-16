@@ -186,12 +186,37 @@ create/update: clients write through the Mobile API's key, never directly.
 | `resetAt` | datetime | optional |
 | `is21Plus` | boolean | optional, default `false` |
 
-- **No indexes in v1, by design** — but see the index note under *Operational notes* before
-  a full App Store rollout.
+- **No indexes in v1** — and the ones the queries want cannot be created at all, because
+  `popup` and `user` are relationship attributes. See the index note under *Operational
+  notes* before a full App Store rollout.
+
+> ⚠️ **`user_profiles` deletion must stay routed through the Mobile API function.**
+> `popup_interactions` is `label:admin`-only, but `user_profiles` grants delete to `users`,
+> and `popup_interactions.user` cascades from it. A *session* deleting a profile row
+> directly would therefore 401 for any user who has ever seen a pop-up. It works today only
+> because every caller goes through `POST /delete-account`, which runs on the function's
+> API key (`Mobile API/src/main.ts` `setKey(apiKey)`) and so skips the check entirely:
+> the panel via `appUsersService.delete` (`src/lib/services.ts`), the app via
+> `deleteAccount` (`samplefinder-app/src/lib/auth.ts`). The app's own
+> `database.deleteUserProfile` does delete the row from a session — it is exported but
+> never called. **Do not wire it up, and do not "simplify" the panel to a direct
+> `databases.deleteDocument` on `user_profiles`.** If that path is ever needed, grant
+> `popup_interactions` `read`/`delete` to `users` first.
 - **Defer the `trivia` permission tightening.** `trivia` is already live in prod; switching
   it to `label:admin` locks out any admin not carrying the label. It is separable and the
   pop-up code does not depend on it. If you do want it, complete Phase 1 first and change
   the permissions in the console — not via `push tables`.
+
+> ⚠️ **`appwrite.config.json` was wrong about three tables until 2026-09-16.** It declared
+> `trivia` as `label:admin` and `trivia_responses` / `reviews` as `[]`, while both live
+> projects have had `create/read/update/delete("users")` on all three all along. It also
+> omitted the `read("any")` that `settings` carries live. The config has been corrected to
+> match live, because the committed file is the only description most readers ever see —
+> and because a `push tables` against it would have *created* the 401 cascade bug on
+> `reviews` and `trivia_responses`, and broken the mobile app, which reads and writes
+> `reviews` directly from a user session (`samplefinder-app/src/lib/database/reviews.ts`).
+> When auditing permissions, read the live API, not this file. `referrals` exists on
+> production only — it is in neither the config nor staging.
 
 **Immediately verify (as a labeled admin, in the dashboard):** create/edit/delete a popup
 and confirm the list page loads. A `401`/`403` on a write means that admin isn't labeled —
@@ -331,10 +356,20 @@ Permissions-only and code-only changes; no destructive data migration.
 - **"Impressions" counts every sighting; "Unique Users Shown" counts people** (SAM-12). The
   two legitimately differ whenever someone saw a pop-up more than once — a repeat viewer is
   one row in the viewer table carrying their own count, not several rows.
-- **`popup_interactions` has no indexes.** Every pop-up fetch and view-record scans the
-  table. That is invisible at TestFlight scale and a real problem at full App Store
-  rollout: add a compound index on `popup` + `user`, and `popup` + `$createdAt` for the
-  stats page, before wide release.
+- **`popup_interactions` has no indexes, and cannot get the ones it needs.** Every pop-up
+  fetch and view-record scans the table — invisible at TestFlight scale, a real problem at
+  full App Store rollout. But the two columns every hot query filters on, `user` and
+  `popup`, are **relationship** attributes, and Appwrite 2.2.0 refuses outright:
+  `Cannot create an index for a relationship attribute` (400 `attribute_type_invalid`).
+  Verified against staging — all three candidate indexes were rejected. `dayKey`,
+  `clicked`, `shownAt` and `$createdAt` *are* indexable; the relationship columns are not,
+  in any position of a compound index.
+
+  So the only real fix is to **denormalise**: add plain `userId` / `popupId` string columns
+  next to the relationships, write both on create, point the function queries at the string
+  columns, and index those. The relationships must stay — they are what gives us the
+  `onDelete: cascade` fixed above. Tracked in SAM-13; do not re-plan it as "just add the
+  indexes", because that was tried and is impossible.
 - **Counters vs. rows:** the `views`/`clicks` counters on a popup doc are cheap
   approximations (non-atomic increments; a rare double-tap or cross-device race can drift).
   The **details page** figures (unique users shown, unique clickers, CTR) are computed from

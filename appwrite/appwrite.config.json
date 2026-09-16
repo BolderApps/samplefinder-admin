@@ -1132,10 +1132,10 @@
         {
             "$id": "trivia",
             "$permissions": [
-                "create(\"label:admin\")",
-                "read(\"label:admin\")",
-                "update(\"label:admin\")",
-                "delete(\"label:admin\")"
+                "create(\"users\")",
+                "read(\"users\")",
+                "update(\"users\")",
+                "delete(\"users\")"
             ],
             "databaseId": "69217af50038b9005a61",
             "name": "Trivia",
@@ -1265,7 +1265,12 @@
         },
         {
             "$id": "trivia_responses",
-            "$permissions": [],
+            "$permissions": [
+                "create(\"users\")",
+                "read(\"users\")",
+                "update(\"users\")",
+                "delete(\"users\")"
+            ],
             "databaseId": "69217af50038b9005a61",
             "name": "Trivia Responses",
             "enabled": true,
@@ -1318,7 +1323,12 @@
         },
         {
             "$id": "reviews",
-            "$permissions": [],
+            "$permissions": [
+                "create(\"users\")",
+                "read(\"users\")",
+                "update(\"users\")",
+                "delete(\"users\")"
+            ],
             "databaseId": "69217af50038b9005a61",
             "name": "Reviews",
             "enabled": true,
@@ -1424,7 +1434,8 @@
                 "create(\"users\")",
                 "read(\"users\")",
                 "update(\"users\")",
-                "delete(\"users\")"
+                "delete(\"users\")",
+                "read(\"any\")"
             ],
             "databaseId": "69217af50038b9005a61",
             "name": "Settings",
