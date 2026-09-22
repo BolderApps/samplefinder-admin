@@ -44,3 +44,9 @@ scripts/.ulvcheck/
 
 # popup viewer list verification output
 scripts/.pvcheck/
+
+# transient tsc output for scripts/verify-location-import.mjs
+scripts/.licheck/
+
+# subagent-driven-development scratch workspace
+.superpowers/

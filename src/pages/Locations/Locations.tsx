@@ -8,6 +8,7 @@ import {
   LocationsHeader,
   LocationsTable,
   EditLocationModal,
+  ImportLocationsModal,
   SearchAndFilter,
 } from './components'
 
@@ -53,6 +54,7 @@ const Locations = () => {
   const { addNotification } = useNotificationStore()
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isEditModalOpen, setIsEditModalOpen] = useState(false)
+  const [isImportModalOpen, setIsImportModalOpen] = useState(false)
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [selectedLocation, setSelectedLocation] = useState<UILocation | null>(null)
   const [locationToDelete, setLocationToDelete] = useState<UILocation | null>(null)
@@ -353,7 +355,10 @@ const Locations = () => {
   return (
     <DashboardLayout>
       <div className="p-8">
-        <LocationsHeader onAddLocation={() => setIsModalOpen(true)} />
+        <LocationsHeader
+          onAddLocation={() => setIsModalOpen(true)}
+          onBulkImport={() => setIsImportModalOpen(true)}
+        />
         {error && (
           <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
             {error}
@@ -415,6 +420,16 @@ const Locations = () => {
               }
             : undefined
         }
+      />
+
+      {/* Bulk Import Locations Modal */}
+      <ImportLocationsModal
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onImported={async () => {
+          setCurrentPage(1)
+          await fetchLocations(1)
+        }}
       />
 
       {/* Delete Confirmation Modal */}

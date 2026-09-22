@@ -17,7 +17,8 @@
     "verify:user-search": "tsc src/lib/userSearch.ts --outDir scripts/.uscheck --target es2020 --module es2020 --skipLibCheck && node scripts/verify-user-search.mjs",
     "verify:user-list-view": "tsc src/lib/userListView.ts src/lib/userSearch.ts --outDir scripts/.ulvcheck --target es2020 --module commonjs --skipLibCheck && node -e \"require('fs').writeFileSync('scripts/.ulvcheck/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node scripts/verify-user-list-view.mjs",
     "verify:popup-viewers": "tsc src/lib/popupViewers.ts src/lib/userSearch.ts src/lib/userListView.ts --outDir scripts/.pvcheck --target es2020 --module commonjs --skipLibCheck && node -e \"require('fs').writeFileSync('scripts/.pvcheck/package.json','{\\\"type\\\": \\\"commonjs\\\"}')\" && node scripts/verify-popup-viewers.mjs",
-    "verify": "npm run verify:points && npm run verify:user-search && npm run verify:user-list-view && npm run verify:popup-viewers && npm run verify:report-builder",
+    "verify:location-import": "tsc src/lib/locationImport/*.ts --outDir scripts/.licheck --target es2020 --module commonjs --skipLibCheck && node -e \"require('fs').writeFileSync('scripts/.licheck/package.json','{\\\"type\\\": \\\"commonjs\\\"}')\" && node scripts/verify-location-import.mjs",
+    "verify": "npm run verify:points && npm run verify:user-search && npm run verify:user-list-view && npm run verify:popup-viewers && npm run verify:report-builder && npm run verify:location-import",
     "label:admin-users": "node scripts/label-admin-users.mjs"
   },
   "dependencies": {

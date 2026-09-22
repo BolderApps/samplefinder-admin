@@ -4,6 +4,7 @@ import { Icon } from '@iconify/react'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 import AddressAutocomplete from './AddressAutocomplete'
+import { GOOGLE_MAPS_API_KEY } from '../lib/googleMapsKey'
 
 // Fix for default marker icon in react-leaflet
 import markerIcon2x from 'leaflet/dist/images/marker-icon-2x.png'
@@ -17,8 +18,6 @@ L.Icon.Default.mergeOptions({
   iconRetinaUrl: markerIcon2x,
   shadowUrl: markerShadow,
 })
-
-const GOOGLE_MAPS_API_KEY = 'AIzaSyAywmgeNZsxezVKVV8k3w3v9K8tssxh4mc'
 
 interface AddressComponents {
   address: string
