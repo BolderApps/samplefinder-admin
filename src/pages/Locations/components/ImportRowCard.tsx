@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { Icon } from '@iconify/react'
+import { canUseGoogle } from '../../../lib/locationImport'
 import type { AddressFields, ClassifiedRow } from '../../../lib/locationImport'
 
 interface ImportRowCardProps {
@@ -78,7 +79,11 @@ const ImportRowCard = ({
               <dd>
                 <span className="line-through text-gray-500">{difference.typed || '(blank)'}</span>
                 <span className="mx-1.5 text-gray-400">&rarr;</span>
-                <span className="font-medium text-gray-900">{difference.google}</span>
+                {/* An empty Google value means Google returned no such component
+                    at all — naming it explains why 'Use Google' is not offered. */}
+                <span className="font-medium text-gray-900">
+                  {difference.google || '(no match)'}
+                </span>
               </dd>
             </div>
           ))}
@@ -127,17 +132,20 @@ const ImportRowCard = ({
       ) : (
         row.status !== 'duplicate' && (
           <div className="mt-3 flex flex-wrap gap-2">
-            {/* 'Keep mine' is offered only on review rows, which always carry a match
-                and therefore have coordinates to adopt. */}
+            {/* 'Use Google' is withheld when Google matched no street: there is
+                nothing to adopt for the field under review, and offering it would
+                certify the typed street with one click. See canUseGoogle. */}
+            {canUseGoogle(row) && (
+              <button onClick={() => onUseGoogle(row.rowNumber)} className={BTN_PRIMARY}>
+                Use Google
+              </button>
+            )}
+            {/* 'Keep mine' is offered on every review row, which always carries a
+                match and therefore has coordinates to adopt. */}
             {row.status === 'review' && (
-              <>
-                <button onClick={() => onUseGoogle(row.rowNumber)} className={BTN_PRIMARY}>
-                  Use Google
-                </button>
-                <button onClick={() => onKeepMine(row.rowNumber)} className={BTN_SECONDARY}>
-                  Keep mine
-                </button>
-              </>
+              <button onClick={() => onKeepMine(row.rowNumber)} className={BTN_SECONDARY}>
+                Keep mine
+              </button>
             )}
             {canEdit && (
               <button onClick={() => { resetDraft(); setIsEditing(true) }} className={BTN_SECONDARY}>

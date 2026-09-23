@@ -20,7 +20,8 @@ const { normalizeForCompare, statesMatch, zipsMatch, diffAddress, resolveStateFo
 const { findDuplicates } = require('./.licheck/findDuplicates.js')
 const { buildGeocodeQuery, mapGeocodeResponse, createGoogleGeocoder } =
   require('./.licheck/geocodeAddress.js')
-const { classifyRow, applyAddressEdit } = require('./.licheck/classifyRow.js')
+const { classifyRow, applyAddressEdit, canUseGoogle, applyGoogleMatch } =
+  require('./.licheck/classifyRow.js')
 const { classifyAll } = require('./.licheck/classifyAll.js')
 
 let failures = 0
@@ -435,6 +436,98 @@ eq('a repairable row reaches ready after an edit',
 eq('a whitespace-only name counts as blank',
   applyAddressEdit({ ...namelessRow, name: '   ' }, editFields).parseError,
   'Missing required field: Name')
+
+// --- canUseGoogle / applyGoogleMatch (SAM-16) --------------------------------
+// "Use Google" means "Google's answer is the truth for this row". When Google
+// matched no street at all it has no answer to give for the one field under
+// suspicion, so the action must not be offered and must not promote the row.
+
+// Captured verbatim from the live Geocoding API on 2026-09-23 for
+// "zzqq xxwv plnk, Zzzzville, PA 19102" — the SAM-16 repro address. A street
+// Google cannot match comes back as a postal_code-level hit with no
+// street_number and no route, which is what makes match.address empty.
+const LIVE_POSTAL_ONLY = {
+  status: 'OK',
+  results: [{
+    address_components: [
+      { types: ['postal_code'], long_name: '19102', short_name: '19102' },
+      { types: ['locality', 'political'], long_name: 'Philadelphia', short_name: 'Philadelphia' },
+      { types: ['administrative_area_level_1', 'political'], long_name: 'Pennsylvania', short_name: 'PA' },
+      { types: ['country', 'political'], long_name: 'United States', short_name: 'US' },
+    ],
+    geometry: { location: { lat: 39.9556241, lng: -75.1647529 }, location_type: 'APPROXIMATE' },
+    partial_match: true,
+    types: ['postal_code'],
+  }],
+}
+
+const junkRow = parsed({ address: 'zzqq xxwv plnk', city: 'Zzzzville', zipCode: '19102' })
+const junkClassified = classifyRow(junkRow, mapGeocodeResponse(LIVE_POSTAL_ONLY))
+
+eq('a postal-code-only Google result carries no street',
+  mapGeocodeResponse(LIVE_POSTAL_ONLY).match.address, '')
+
+eq('an unmatchable street still lands in review',
+  junkClassified.status, 'review')
+
+eq('Use Google is withheld when Google matched no street',
+  canUseGoogle(junkClassified), false)
+
+eq('applying Google to such a row leaves it in review',
+  applyGoogleMatch(junkClassified).status, 'review')
+
+eq('applying Google to such a row does not touch the typed street',
+  applyGoogleMatch(junkClassified).address, 'zzqq xxwv plnk')
+
+eq('applying Google to such a row keeps its reason and diff',
+  [applyGoogleMatch(junkClassified).reason !== null,
+   applyGoogleMatch(junkClassified).diff.length > 0],
+  [true, true])
+
+// The legitimate case this must not regress: the client's omitted-directional
+// example, where Google does have a street to offer.
+const directional = classifyRow(
+  parsed({ address: '1200 Broad St' }),
+  matchOutcome({ address: '1200 N Broad St' })
+)
+
+eq('Use Google is offered when Google has a street',
+  canUseGoogle(directional), true)
+
+eq('applying Google adopts the corrected street and marks the row ready',
+  [applyGoogleMatch(directional).address, applyGoogleMatch(directional).status],
+  ['1200 N Broad St', 'ready'])
+
+eq('applying Google clears the reason and the diff',
+  [applyGoogleMatch(directional).reason, applyGoogleMatch(directional).diff],
+  [null, []])
+
+eq('applying Google stores the long state name',
+  applyGoogleMatch(directional).state, 'Pennsylvania')
+
+// Google returns an empty locality for some unincorporated areas; those fields
+// fall back to the typed value rather than being blanked out.
+const noLocality = classifyRow(
+  parsed({ address: '1200 Broad St' }),
+  matchOutcome({ address: '1200 N Broad St', city: '', zipCode: '' })
+)
+
+eq('an empty Google city or zip falls back to the typed value',
+  [applyGoogleMatch(noLocality).city, applyGoogleMatch(noLocality).zipCode],
+  ['Philadelphia', '19145'])
+
+eq('a whitespace-only Google street counts as no street',
+  canUseGoogle(classifyRow(parsed(), matchOutcome({ address: '   ', partialMatch: true }))),
+  false)
+
+eq('Use Google is withheld on a row that never matched',
+  canUseGoogle(classifyRow(parsed(), { kind: 'none' })), false)
+
+eq('Use Google is withheld once the row is already ready',
+  canUseGoogle(applyGoogleMatch(directional)), false)
+
+eq('applying Google twice is a no-op the second time',
+  applyGoogleMatch(applyGoogleMatch(directional)).address, '1200 N Broad St')
 
 if (failures > 0) {
   console.error(`\n${failures} assertion(s) failed`)

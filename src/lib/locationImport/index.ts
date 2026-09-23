@@ -5,6 +5,6 @@ export {
 } from './normalizeAddress'
 export { findDuplicates } from './findDuplicates'
 export { buildGeocodeQuery, mapGeocodeResponse, createGoogleGeocoder } from './geocodeAddress'
-export { classifyRow, applyAddressEdit } from './classifyRow'
+export { classifyRow, applyAddressEdit, canUseGoogle, applyGoogleMatch } from './classifyRow'
 export { classifyAll } from './classifyAll'
 export type { ClassifyAllOptions, ClassifyAllResult } from './classifyAll'

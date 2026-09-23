@@ -224,7 +224,7 @@ default; `review` and `failed` are expanded.
 
 | Status | Actions | Effect |
 |---|---|---|
-| `review` | **Use Google** | adopt Google's street/city/state/zip **and** coordinates → `ready` |
+| `review` | **Use Google** | adopt Google's street/city/state/zip **and** coordinates → `ready`. Offered only when Google returned a street (see below) |
 | | **Keep mine** | keep the typed address *including its state*, adopt Google's coordinates → `ready` |
 | | **Edit** | inline edit of the four address fields → re-geocode that row → reclassify |
 | | **Skip** | excluded from import |
@@ -234,6 +234,20 @@ default; `review` and `failed` are expanded.
 **"Keep mine" keeps the typed street string but takes Google's coordinates.** The client sometimes
 knows better than Google about the address text; they never know better about the lat/lng, and a
 location without a correct pin is broken on the mobile map.
+
+**"Use Google" is withheld when Google returned no street.** An address Google cannot match does
+not come back as a failure — it comes back as a postal-code-level hit: `partial_match: true`,
+`location_type: APPROXIMATE`, and no `street_number` or `route` component at all, so the mapped
+`match.address` is empty. Adopting that answer would rewrite the city, state and zip while leaving
+the street — the one field under review — exactly as typed, and the row would be promoted to
+`ready` carrying an unverified street and a ZIP-centroid pin. `canUseGoogle` therefore gates both
+the button and the state transition (`applyGoogleMatch` is a no-op without it), and the diff shows
+`(no match)` on the Google side so the absence of the button is legible.
+
+The gate keys on *whether Google supplied a street*, not on the review reason: a `partial_match`
+that does carry a street still offers **Use Google**, because there is then a real correction to
+adopt. The operator's two remaining routes are unchanged — **Edit** to supply a real street and
+re-check it, or **Keep mine** to take explicit ownership of the typed one.
 
 **`Name` is not editable in the review step.** Only the four address fields can be edited. A
 `duplicate` row therefore cannot be resolved by renaming it in place — the operator fixes the name
@@ -280,7 +294,8 @@ src/lib/locationImport/
   geocodeAddress.ts      single Google call + response mapping
   classifyAll.ts         concurrency pool, retry, batch-abort semantics
   classifyRow.ts         ready | review | failed decision;
-                         applyAddressEdit folds an inline edit back into a row
+                         applyAddressEdit folds an inline edit back into a row;
+                         canUseGoogle / applyGoogleMatch gate the "Use Google" action
   index.ts
 
 src/pages/Locations/components/
@@ -340,6 +355,10 @@ access**, using recorded Geocoding JSON responses:
 | typed `North Broad St` vs Google `N Broad St` | `ready` (directional folded, not dropped) |
 | typed `Broad St` vs Google `N Broad St` | `review` (directional missing) |
 | `partial_match: true` | `review` |
+| Google returns no street (postal-code-level hit) | `review`, **Use Google** withheld |
+| **Use Google** on such a row | no-op: stays `review`, typed street untouched |
+| `partial_match: true` *with* a street | **Use Google** still offered |
+| **Use Google** on a street diff | adopts Google's street, stores `Pennsylvania`, → `ready` |
 | `location_type: APPROXIMATE` | `review` |
 | `ZERO_RESULTS` | `failed` |
 | name already in table | `duplicate`, not geocoded |

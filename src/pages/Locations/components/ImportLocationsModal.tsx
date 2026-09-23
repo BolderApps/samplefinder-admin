@@ -5,8 +5,8 @@ import { GOOGLE_MAPS_API_KEY } from '../../../lib/googleMapsKey'
 import { locationsService } from '../../../lib/services'
 import { useNotificationStore } from '../../../stores/notificationStore'
 import {
-  applyAddressEdit, classifyAll, classifyRow, createGoogleGeocoder, parseLocationsCsv,
-  resolveStateForWrite,
+  applyAddressEdit, applyGoogleMatch, classifyAll, classifyRow, createGoogleGeocoder,
+  parseLocationsCsv, resolveStateForWrite,
   type AddressFields, type ClassifiedRow,
 } from '../../../lib/locationImport'
 
@@ -98,21 +98,11 @@ const ImportLocationsModal = ({ isOpen, onClose, onImported }: ImportLocationsMo
 
   /**
    * Adopt Google's fields. `match.state` is the long name, which is what we store.
-   * Google can return an empty `locality` or `postal_code` (e.g. unincorporated
-   * areas), so a field is only adopted when Google actually has a value —
-   * otherwise the operator's typed value is kept rather than blanked out.
+   * See applyGoogleMatch: the transition is guarded, so a row whose street Google
+   * never matched is left in review rather than certified by this button.
    */
   const handleUseGoogle = (rowNumber: number) => {
-    replaceRow(rowNumber, (row) => (row.match === null ? row : {
-      ...row,
-      address: row.match.address !== '' ? row.match.address : row.address,
-      city: row.match.city !== '' ? row.match.city : row.city,
-      state: row.match.state !== '' ? row.match.state : row.state,
-      zipCode: row.match.zipCode !== '' ? row.match.zipCode : row.zipCode,
-      status: 'ready',
-      reason: null,
-      diff: [],
-    }))
+    replaceRow(rowNumber, applyGoogleMatch)
   }
 
   /** Keep the typed address but retain `match` — its coordinates are still used. */
